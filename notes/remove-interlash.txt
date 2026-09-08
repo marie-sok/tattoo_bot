@@ -1,0 +1,1 @@
+Current production PMU services intentionally exclude interlash: lips, brows, correction, brow refresh, lip refresh only.
