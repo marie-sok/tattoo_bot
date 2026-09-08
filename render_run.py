@@ -6,6 +6,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import config
@@ -46,6 +47,20 @@ async def tomorrow_cmd(message):
     await owner_list(message, 1)
 
 
+async def group_booking_entry(message, bot: Bot):
+    """Safe funnel from Inna's group/channel discussion into private booking chat."""
+    me = await bot.get_me()
+    deep_link = f"https://t.me/{me.username}?start=inna_kolor"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✨ Записаться к Инне", url=deep_link)],
+        [InlineKeyboardButton(text="🖤 Группа Инны", url=f"https://t.me/{config.group_username}")],
+    ])
+    await message.answer(
+        "Запись ведём в личном чате с ботом — там безопасно отправлять телефон, референс и выбирать свободное время 🖤",
+        reply_markup=kb,
+    )
+
+
 async def reminder_job(bot: Bot):
     now = datetime.now(TZ).replace(tzinfo=None)
     tomorrow = (now + timedelta(days=1)).date()
@@ -67,7 +82,9 @@ async def health(_request):
     return web.json_response({
         "ok": True,
         "service": "inna_tattoo_bot",
-        "ai": bool(config.openrouter_api_key),
+        "ai_configured": bool(config.openrouter_api_key),
+        "offline_fallback": True,
+        "group": f"@{config.group_username}",
         "model": config.openrouter_model,
     })
 
@@ -93,13 +110,17 @@ async def main():
     )
     dp = Dispatcher()
 
-    dp.message.register(start, CommandStart())
-    dp.message.register(begin, F.text == '✨ Записаться')
-    dp.message.register(portfolio, F.text == '🖤 Работы Инны')
-    dp.message.register(my_booking, F.text == '📅 Моя запись')
-    dp.message.register(today_cmd, Command('today'))
-    dp.message.register(tomorrow_cmd, Command('tomorrow'))
-    dp.message.register(all_bookings, Command('bookings'))
+    dp.message.register(start, CommandStart(), F.chat.type == 'private')
+    dp.message.register(begin, F.text == '✨ Записаться', F.chat.type == 'private')
+    dp.message.register(portfolio, F.text == '🖤 Работы Инны', F.chat.type == 'private')
+    dp.message.register(my_booking, F.text == '📅 Моя запись', F.chat.type == 'private')
+    dp.message.register(today_cmd, Command('today'), F.chat.type == 'private')
+    dp.message.register(tomorrow_cmd, Command('tomorrow'), F.chat.type == 'private')
+    dp.message.register(all_bookings, Command('bookings'), F.chat.type == 'private')
+
+    # In @inna_kolor or any group where the bot is added, /book opens a safe private booking funnel.
+    dp.message.register(group_booking_entry, Command('book'), F.chat.type.in_({'group', 'supergroup'}))
+    dp.message.register(group_booking_entry, Command('booking'), F.chat.type.in_({'group', 'supergroup'}))
 
     dp.callback_query.register(svc, F.data.startswith('svc:'))
     dp.callback_query.register(detail, F.data.startswith('size:') | F.data.startswith('pmu:'))
@@ -115,8 +136,8 @@ async def main():
     dp.callback_query.register(move_time, Booking.move_time, F.data.startswith('mslot:'))
     dp.callback_query.register(confirm, F.data.startswith('confirm:'))
 
-    # Last handler: all free-text messages go to OpenRouter concierge.
-    dp.message.register(ai_chat, F.text)
+    # AI concierge is private-chat only; if OpenRouter fails, app.ai_agent uses deterministic fallback.
+    dp.message.register(ai_chat, F.text, F.chat.type == 'private')
 
     scheduler = AsyncIOScheduler(timezone=config.tz)
     scheduler.add_job(reminder_job, 'cron', hour=18, minute=0, args=[bot])
@@ -124,7 +145,8 @@ async def main():
     health_runner = await start_health_server()
 
     print(
-        f"INNA bot started | ai={bool(config.openrouter_api_key)} | "
+        f"INNA bot started | ai_configured={bool(config.openrouter_api_key)} | "
+        f"offline_fallback=True | group=@{config.group_username} | "
         f"model={config.openrouter_model} | port={config.port}"
     )
     try:
