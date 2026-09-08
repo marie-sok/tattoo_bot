@@ -1,1 +1,0 @@
-Portfolio source files are original works by Inna Strakhova. Binary JPGs are deployed from Git blobs; .b64 staging files are not used by the bot.
