@@ -32,12 +32,27 @@ from app.main import (
     owner_list,
     portfolio,
     reference,
-    start,
+    start as client_start,
     svc,
     TZ,
     dtfmt,
     booking_actions,
 )
+
+
+async def private_start(message, state):
+    """Give Inna a dedicated private owner inbox; clients get the normal flow."""
+    username = (message.from_user.username or "").lower()
+    if username == config.owner_username:
+        await state.clear()
+        await owner_inbox_cmd(message)
+        await message.answer(
+            "🖤 <b>Кабинет Инны</b>\n\n"
+            "Новые записи и заявки будут приходить сюда автоматически.\n"
+            "Команды: /today · /tomorrow · /bookings"
+        )
+        return
+    await client_start(message, state)
 
 
 async def today_cmd(message):
@@ -85,6 +100,7 @@ async def health(_request):
         "service": "inna_tattoo_bot",
         "ai_configured": bool(config.openrouter_api_key),
         "offline_fallback": True,
+        "owner_inbox": True,
         "group": f"@{config.group_username}",
         "model": config.openrouter_model,
     })
@@ -111,8 +127,9 @@ async def main():
     )
     dp = Dispatcher()
 
-    dp.message.register(start, CommandStart(), F.chat.type == 'private')
+    dp.message.register(private_start, CommandStart(), F.chat.type == 'private')
     dp.message.register(owner_inbox_cmd, Command('inbox'), F.chat.type == 'private')
+    dp.message.register(owner_inbox_cmd, Command('owner'), F.chat.type == 'private')
     dp.message.register(begin, F.text == '✨ Записаться', F.chat.type == 'private')
     dp.message.register(portfolio, F.text == '🖤 Работы Инны', F.chat.type == 'private')
     dp.message.register(my_booking, F.text == '📅 Моя запись', F.chat.type == 'private')
@@ -138,7 +155,7 @@ async def main():
     dp.callback_query.register(move_time, Booking.move_time, F.data.startswith('mslot:'))
     dp.callback_query.register(confirm, F.data.startswith('confirm:'))
 
-    # AI concierge is private-chat only; if OpenRouter fails, app.ai_agent uses deterministic fallback.
+    # AI concierge is private-chat only; all booking writes and owner notifications work without AI.
     dp.message.register(ai_chat, F.text, F.chat.type == 'private')
 
     scheduler = AsyncIOScheduler(timezone=config.tz)
@@ -148,7 +165,7 @@ async def main():
 
     print(
         f"INNA bot started | ai_configured={bool(config.openrouter_api_key)} | "
-        f"offline_fallback=True | group=@{config.group_username} | "
+        f"offline_fallback=True | owner_inbox=True | group=@{config.group_username} | "
         f"model={config.openrouter_model} | port={config.port}"
     )
     try:
