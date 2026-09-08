@@ -36,13 +36,32 @@ def owner_text(r):
 
 
 async def owner_id():
+    # Explicit OWNER_CHAT_ID has priority and must be a private Telegram chat id.
+    if getattr(config, 'owner_chat_id', 0) > 0:
+        return config.owner_chat_id
+
     value = await db.setting_get('owner_chat_id')
-    return int(value) if value else None
+    if not value:
+        return None
+
+    try:
+        chat_id = int(value)
+    except (TypeError, ValueError):
+        return None
+
+    # Private user chat IDs are positive. Groups/supergroups are negative.
+    # Never send client data to a group even if a group id was stored earlier.
+    return chat_id if chat_id > 0 else None
 
 
 async def maybe_bind_owner(m: Message):
+    # Bind Inna only from a private dialog with the bot.
+    # This prevents an admin command used in a group from turning the group
+    # into the destination for private booking notifications.
+    if m.chat.type != 'private':
+        return False
     if m.from_user.username and m.from_user.username.lower() == config.owner_username:
-        await db.setting_set('owner_chat_id', m.chat.id)
+        await db.setting_set('owner_chat_id', m.from_user.id)
         return True
     return False
 
@@ -171,7 +190,7 @@ async def cancel_cb(c: CallbackQuery, bot: Bot):
     oid = await owner_id()
     if oid and c.from_user.id != oid:
         await bot.send_message(oid, f"❌ Клиент отменил запись #{bid}\n{r['name']} · {dtfmt(r['start_at'])}")
-    elif c.from_user.id == oid:
+    elif oid and c.from_user.id == oid:
         await bot.send_message(r['user_id'], f"❌ Запись на {dtfmt(r['start_at'])} отменена мастером.")
     await c.answer()
 
@@ -229,14 +248,15 @@ async def portfolio(m: Message, bot: Bot):
 
 async def owner_list(m: Message, offset=0):
     if not await maybe_bind_owner(m):
-        await m.answer('Команда доступна владельцу.'); return
+        await m.answer('Команда доступна владельцу только в личном чате с ботом.'); return
     now = datetime.now(); start_at = datetime.combine((now + timedelta(days=offset)).date(), time.min)
     rows = await db.list_range(start_at, start_at + timedelta(days=1))
     await m.answer('\n\n'.join(owner_text(r) for r in rows) if rows else 'Записей нет.')
 
 
 async def all_bookings(m: Message):
-    if not await maybe_bind_owner(m): return
+    if not await maybe_bind_owner(m):
+        await m.answer('Команда доступна владельцу только в личном чате с ботом.'); return
     start_at = datetime.now(); rows = await db.list_range(start_at, start_at + timedelta(days=30))
     await m.answer('\n\n'.join(owner_text(r) for r in rows[:30]) if rows else 'На ближайшие 30 дней записей нет.')
 
