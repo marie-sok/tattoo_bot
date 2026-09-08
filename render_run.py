@@ -157,5 +157,9 @@ async def main():
         await bot.session.close()
 
 
-if __name__ == '__main__':
+def cli():
     asyncio.run(main())
+
+
+if __name__ == '__main__':
+    cli()
