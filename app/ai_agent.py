@@ -12,13 +12,18 @@ SYSTEM_PROMPT = """Ты — Telegram-администратор мастера I
 
 Факты, которые нельзя менять:
 - мастер один: Инна Страхова;
-- рабочее время: 10:00–22:00;
-- перманентный макияж длится 90 минут;
-- татуировка: минимум 60 минут; ориентир по размеру: до 5 см — 60 минут, 5–15 см — 120 минут, больше 15 см — 180 минут;
+- рабочее время: 11:00–18:00;
 - реальные свободные даты/время определяет только система бронирования. Никогда не придумывай свободные слоты;
-- предоплата 1000 ₽ будет подключена позже, сейчас оплату не принимай и не обещай, что она уже работает;
+- татуировка: один сеанс 3–4 часа — 12 000 ₽; один сеанс 6–7 часов — 16 000 ₽;
+- перманентный макияж губ — 5 000 ₽;
+- перманентный макияж бровей — 5 000 ₽;
+- коррекция через 1–1,5 месяца — 3 000 ₽;
+- рефреш бровей через 1–2 года — 4 000 ₽;
+- рефреш губ через 1–2 года — 4 000 ₽;
+- заживляющий крем клиент получает в подарок;
 - запись можно перенести или отменить через бота;
-- за день до сеанса бот просит подтвердить запись.
+- за день до сеанса бот просит подтвердить запись;
+- уведомления Инне о заявках и записях отправляются отдельной детерминированной логикой и не зависят от AI/OpenRouter.
 
 Не ставь медицинские диагнозы и не давай медицинских гарантий. Для противопоказаний и индивидуальных рисков рекомендуй обсудить вопрос с мастером и при необходимости врачом.
 
@@ -27,18 +32,18 @@ SYSTEM_PROMPT = """Ты — Telegram-администратор мастера I
   "reply": "короткий ответ клиенту на русском",
   "intent": "book|portfolio|my_booking|question|handoff",
   "service": "tattoo|pmu|unknown",
-  "tattoo_duration": 60|120|180|null,
-  "pmu_detail": "Брови|Губы|Межресничка|null"
+  "tattoo_duration": null,
+  "pmu_detail": "Брови|Губы|Коррекция|Рефреш бровей|Рефреш губ|null"
 }
 
 Правила intent:
 - book — клиент хочет записаться, выбрать дату/время или явно описывает желаемую процедуру;
 - portfolio — хочет посмотреть работы/примеры;
 - my_booking — спрашивает про свою существующую запись, перенос или отмену;
-- handoff — сложный вопрос, цена индивидуальной татуировки, противопоказания/осложнения, или нужен ответ самой Инны;
+- handoff — сложный индивидуальный вопрос, противопоказания/осложнения, или нужен ответ самой Инны;
 - question — остальные вопросы.
 
-Если клиент хочет тату, но размер непонятен, tattoo_duration=null. Если PMU-процедура неясна, pmu_detail=null.
+Для татуировки tattoo_duration всегда null: длительность сеанса клиент выбирает кнопкой 3–4 или 6–7 часов, чтобы календарь резервировал правильное окно.
 """
 
 
@@ -71,32 +76,29 @@ def offline_agent(user_text: str) -> AgentResult:
         return AgentResult("Проверяю твою активную запись.", intent="my_booking")
 
     tattoo = any(x in text for x in ("тату", "татую", "эскиз", "набить"))
-    pmu = any(x in text for x in ("перманент", "пму", "бров", "губ", "межреснич"))
+    pmu = any(x in text for x in ("перманент", "пму", "бров", "губ", "коррекц", "рефреш"))
     booking = any(x in text for x in ("запис", "хочу", "свобод", "окно", "дата", "время"))
 
     if tattoo or (booking and not pmu):
-        duration = None
-        if any(x in text for x in ("до 5 см", "маленьк", "мини")):
-            duration = 60
-        elif any(x in text for x in ("5-15", "5–15", "средн")):
-            duration = 120
-        elif any(x in text for x in ("больше 15", "крупн", "больш")):
-            duration = 180
         return AgentResult(
-            "Поняла 🖤 Давай оформим запись на татуировку.",
+            "Поняла 🖤 Давай оформим запись на татуировку. Выберем длительность сеанса — 3–4 или 6–7 часов.",
             intent="book",
             service="tattoo",
-            tattoo_duration=duration,
+            tattoo_duration=None,
         )
 
     if pmu:
         detail = None
-        if "бров" in text:
+        if "коррекц" in text:
+            detail = "Коррекция"
+        elif "рефреш" in text and "бров" in text:
+            detail = "Рефреш бровей"
+        elif "рефреш" in text and "губ" in text:
+            detail = "Рефреш губ"
+        elif "бров" in text:
             detail = "Брови"
         elif "губ" in text:
             detail = "Губы"
-        elif "межреснич" in text:
-            detail = "Межресничка"
         return AgentResult(
             "Поняла 🖤 Давай оформим запись на перманентный макияж.",
             intent="book",
@@ -104,11 +106,17 @@ def offline_agent(user_text: str) -> AgentResult:
             pmu_detail=detail,
         )
 
+    if any(x in text for x in ("цена", "стоимость", "сколько", "прайс")):
+        return AgentResult(
+            "Тату: 3–4 часа — 12 000 ₽, 6–7 часов — 16 000 ₽. Губы и брови — по 5 000 ₽, коррекция — 3 000 ₽, рефреш — 4 000 ₽. Заживляющий крем — в подарок 🖤",
+            intent="question",
+        )
+
     if booking:
         return AgentResult("Давай запишем тебя 🖤", intent="book", service="unknown")
 
     return AgentResult(
-        "Я сейчас работаю в автономном режиме. Запись, перенос и отмена доступны как обычно — можно написать «хочу записаться» или использовать кнопки 🖤",
+        "Я сейчас работаю в автономном режиме. Запись, перенос, отмена и уведомления Инне работают как обычно 🖤",
         intent="question",
     )
 
@@ -143,17 +151,15 @@ async def ask_agent(user_text: str) -> AgentResult:
             response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"]
             data = _clean_json(content)
-            duration = data.get("tattoo_duration")
-            if duration not in (60, 120, 180):
-                duration = None
             detail = data.get("pmu_detail")
-            if detail not in ("Брови", "Губы", "Межресничка"):
+            allowed_details = {"Брови", "Губы", "Коррекция", "Рефреш бровей", "Рефреш губ"}
+            if detail not in allowed_details:
                 detail = None
             return AgentResult(
                 reply=str(data.get("reply") or "Расскажи чуть подробнее, что хочешь сделать 🖤"),
                 intent=str(data.get("intent") or "question"),
                 service=str(data.get("service") or "unknown"),
-                tattoo_duration=duration,
+                tattoo_duration=None,
                 pmu_detail=detail,
             )
     except Exception as exc:
