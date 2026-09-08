@@ -5,7 +5,7 @@ def main_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text='✨ Записаться'), KeyboardButton(text='🖤 Работы Инны')],
-            [KeyboardButton(text='📅 Моя запись')],
+            [KeyboardButton(text='💰 Цены'), KeyboardButton(text='📅 Моя запись')],
         ],
         resize_keyboard=True,
     )
@@ -20,19 +20,18 @@ def service_kb():
 
 def tattoo_size_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='До 5 см · ~1 ч', callback_data='size:60')],
-        [InlineKeyboardButton(text='5–15 см · ~2 ч', callback_data='size:120')],
-        [InlineKeyboardButton(text='Больше 15 см · ~3 ч', callback_data='size:180')],
+        [InlineKeyboardButton(text='3–4 часа · 12 000 ₽', callback_data='size:240')],
+        [InlineKeyboardButton(text='6–7 часов · 16 000 ₽', callback_data='size:420')],
     ])
 
 
 def pmu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text='Брови', callback_data='pmu:Брови'),
-            InlineKeyboardButton(text='Губы', callback_data='pmu:Губы'),
-        ],
-        [InlineKeyboardButton(text='Межресничка', callback_data='pmu:Межресничка')],
+        [InlineKeyboardButton(text='Губы · 5 000 ₽', callback_data='pmu:lips')],
+        [InlineKeyboardButton(text='Брови · 5 000 ₽', callback_data='pmu:brows')],
+        [InlineKeyboardButton(text='Коррекция · 3 000 ₽', callback_data='pmu:correction')],
+        [InlineKeyboardButton(text='Рефреш бровей · 4 000 ₽', callback_data='pmu:refresh_brows')],
+        [InlineKeyboardButton(text='Рефреш губ · 4 000 ₽', callback_data='pmu:refresh_lips')],
     ])
 
 
