@@ -17,6 +17,7 @@ def _env(*names: str, default: str = "") -> str:
 class Config:
     token: str = _env("BOT_TOKEN")
     owner_username: str = _env("OWNER_USERNAME", default="inna_strakhova").lstrip("@").lower()
+    owner_chat_id: int = int(_env("OWNER_CHAT_ID", default="0"))
     group_username: str = _env("GROUP_USERNAME", default="inna_kolor").lstrip("@").lower()
     tz: str = _env("TZ", default="Europe/Moscow")
     work_start: str = _env("WORK_START", default="10:00")
