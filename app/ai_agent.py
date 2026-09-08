@@ -60,9 +60,62 @@ def _clean_json(text: str) -> dict[str, Any]:
     return json.loads(text)
 
 
-async def ask_agent(user_text: str) -> AgentResult | None:
+def offline_agent(user_text: str) -> AgentResult:
+    """Deterministic fallback used when OpenRouter is missing or unavailable."""
+    text = user_text.lower().strip()
+
+    if any(x in text for x in ("работы", "портфолио", "примеры", "фото работ")):
+        return AgentResult("Конечно 🖤 Показываю работы Инны.", intent="portfolio")
+
+    if any(x in text for x in ("моя запись", "перенести", "перенос", "отменить", "отмена")):
+        return AgentResult("Проверяю твою активную запись.", intent="my_booking")
+
+    tattoo = any(x in text for x in ("тату", "татую", "эскиз", "набить"))
+    pmu = any(x in text for x in ("перманент", "пму", "бров", "губ", "межреснич"))
+    booking = any(x in text for x in ("запис", "хочу", "свобод", "окно", "дата", "время"))
+
+    if tattoo or (booking and not pmu):
+        duration = None
+        if any(x in text for x in ("до 5 см", "маленьк", "мини")):
+            duration = 60
+        elif any(x in text for x in ("5-15", "5–15", "средн")):
+            duration = 120
+        elif any(x in text for x in ("больше 15", "крупн", "больш")):
+            duration = 180
+        return AgentResult(
+            "Поняла 🖤 Давай оформим запись на татуировку.",
+            intent="book",
+            service="tattoo",
+            tattoo_duration=duration,
+        )
+
+    if pmu:
+        detail = None
+        if "бров" in text:
+            detail = "Брови"
+        elif "губ" in text:
+            detail = "Губы"
+        elif "межреснич" in text:
+            detail = "Межресничка"
+        return AgentResult(
+            "Поняла 🖤 Давай оформим запись на перманентный макияж.",
+            intent="book",
+            service="pmu",
+            pmu_detail=detail,
+        )
+
+    if booking:
+        return AgentResult("Давай запишем тебя 🖤", intent="book", service="unknown")
+
+    return AgentResult(
+        "Я сейчас работаю в автономном режиме. Запись, перенос и отмена доступны как обычно — можно написать «хочу записаться» или использовать кнопки 🖤",
+        intent="question",
+    )
+
+
+async def ask_agent(user_text: str) -> AgentResult:
     if not config.openrouter_api_key:
-        return None
+        return offline_agent(user_text)
 
     payload = {
         "model": config.openrouter_model,
@@ -81,7 +134,7 @@ async def ask_agent(user_text: str) -> AgentResult | None:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers=headers,
@@ -103,5 +156,6 @@ async def ask_agent(user_text: str) -> AgentResult | None:
                 tattoo_duration=duration,
                 pmu_detail=detail,
             )
-    except Exception:
-        return None
+    except Exception as exc:
+        print(f"OpenRouter unavailable, offline fallback enabled: {type(exc).__name__}")
+        return offline_agent(user_text)
