@@ -11,6 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import config
 from app import db
+from app.owner_inbox import owner_inbox_cmd
 from app.main import (
     Booking,
     ai_chat,
@@ -111,6 +112,7 @@ async def main():
     dp = Dispatcher()
 
     dp.message.register(start, CommandStart(), F.chat.type == 'private')
+    dp.message.register(owner_inbox_cmd, Command('inbox'), F.chat.type == 'private')
     dp.message.register(begin, F.text == '✨ Записаться', F.chat.type == 'private')
     dp.message.register(portfolio, F.text == '🖤 Работы Инны', F.chat.type == 'private')
     dp.message.register(my_booking, F.text == '📅 Моя запись', F.chat.type == 'private')
