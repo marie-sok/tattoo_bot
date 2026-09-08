@@ -5,16 +5,25 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return default
+
+
 @dataclass(frozen=True)
 class Config:
-    token: str = os.getenv('BOT_TOKEN', '')
-    owner_username: str = os.getenv('OWNER_USERNAME', 'inna_strakhova').lstrip('@').lower()
-    tz: str = os.getenv('TZ', 'Europe/Moscow')
-    work_start: str = os.getenv('WORK_START', '10:00')
-    work_end: str = os.getenv('WORK_END', '22:00')
-    openrouter_api_key: str = os.getenv('OPENROUTER_API_KEY', '')
-    openrouter_model: str = os.getenv('OPENROUTER_MODEL', 'openai/gpt-5.3-chat')
-    openrouter_site_url: str = os.getenv('OPENROUTER_SITE_URL', 'https://t.me/')
+    token: str = _env("BOT_TOKEN")
+    owner_username: str = _env("OWNER_USERNAME", default="inna_strakhova").lstrip("@").lower()
+    tz: str = _env("TZ", default="Europe/Moscow")
+    work_start: str = _env("WORK_START", default="10:00")
+    work_end: str = _env("WORK_END", default="22:00")
+    openrouter_api_key: str = _env("inna_api_key", "OPENROUTER_API_KEY")
+    openrouter_model: str = _env("OPENROUTER_MODEL", default="openrouter/auto")
+    openrouter_site_url: str = _env("OPENROUTER_SITE_URL", default="https://t.me/")
+    port: int = int(_env("PORT", default="10000"))
 
 
 config = Config()
