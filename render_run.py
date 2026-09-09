@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import os
 from datetime import datetime, time, timedelta
 from pathlib import Path
 
@@ -8,7 +10,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import config
@@ -43,6 +45,10 @@ ROOT = Path(__file__).resolve().parent
 WORK_START = "11:00"
 WORK_END = "18:00"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+PUBLIC_URL = os.getenv("RENDER_EXTERNAL_URL", "https://inna-tattoo-bot.onrender.com").rstrip("/")
+WEBHOOK_PATH = "/telegram/webhook"
+TRANSPORT = "starting"
+TELEGRAM_OK = False
 
 PRICE_TEXT = (
     "💰 <b>Цены Инны</b>\n\n"
@@ -78,7 +84,6 @@ async def runtime_slots_for(d, duration: int, exclude=None):
     return out
 
 
-# Production runtime owns the actual availability rules.
 app_main.slots_for = runtime_slots_for
 
 
@@ -159,8 +164,8 @@ async def detail_cb(c, state):
     await c.answer()
 
 
-async def safe_portfolio(message: object, bot: Bot):
-    """Portfolio must never break the bot because of one invalid media file."""
+async def safe_portfolio(message, bot: Bot):
+    """One bad image is skipped; it can never take down the portfolio handler."""
     await message.answer('🖤 <b>Работы Инны</b>')
     tattoo_dir = ROOT / 'assets' / 'portfolio' / 'tattoo'
     pmu_dir = ROOT / 'assets' / 'portfolio' / 'pmu'
@@ -180,16 +185,13 @@ async def safe_portfolio(message: object, bot: Bot):
         try:
             await bot.send_photo(message.chat.id, FSInputFile(photo_path))
             sent += 1
-        except TelegramAPIError as exc:
-            failed += 1
-            print(f"portfolio skip {photo_path.name}: {type(exc).__name__}: {exc}", flush=True)
         except Exception as exc:
             failed += 1
-            print(f"portfolio unexpected skip {photo_path.name}: {type(exc).__name__}: {exc}", flush=True)
+            print(f"portfolio skip {photo_path.name}: {type(exc).__name__}: {exc}", flush=True)
 
     if sent == 0:
         await message.answer(
-            'Сейчас фотографии временно недоступны, но запись и все остальные функции работают 🖤',
+            'Сейчас фотографии временно недоступны, но запись и остальные функции работают 🖤',
             reply_markup=main_kb(),
         )
     elif failed:
@@ -242,43 +244,42 @@ async def health(_request):
     return web.json_response({
         "ok": True,
         "service": "inna_tattoo_bot",
+        "telegram_ok": TELEGRAM_OK,
+        "transport": TRANSPORT,
         "ai_configured": bool(config.openrouter_api_key),
         "offline_fallback": True,
         "owner_inbox": True,
         "work_hours": f"{WORK_START}-{WORK_END}",
         "group": f"@{config.group_username}",
-        "model": config.openrouter_model,
     })
 
 
-async def start_health_server():
+async def start_web_server(bot: Bot, dp: Dispatcher, secret: str):
+    async def telegram_webhook(request: web.Request):
+        if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret:
+            return web.Response(status=403, text="forbidden")
+        try:
+            payload = await request.json()
+            update = Update.model_validate(payload, context={"bot": bot})
+            await dp.feed_update(bot, update)
+            return web.Response(text="ok")
+        except Exception as exc:
+            # Always return 200 after logging. Telegram retries non-2xx responses;
+            # a poison update must not create an endless retry storm.
+            print(f"webhook update error: {type(exc).__name__}: {exc}", flush=True)
+            return web.Response(text="ignored")
+
     app = web.Application()
     app.router.add_get('/', health)
     app.router.add_get('/health', health)
+    app.router.add_post(WEBHOOK_PATH, telegram_webhook)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', config.port).start()
     return runner
 
 
-async def main():
-    if not config.token:
-        raise RuntimeError('BOT_TOKEN missing')
-
-    await db.init_db()
-    bot = Bot(
-        config.token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-
-    # Polling and webhook are mutually exclusive. Clear any stale webhook left by
-    # previous experiments/deployments; otherwise getUpdates can stay silent.
-    await bot.delete_webhook(drop_pending_updates=False)
-    me = await bot.get_me()
-    print(f"Telegram auth OK: @{me.username} id={me.id}", flush=True)
-
-    dp = Dispatcher()
-
+def register_handlers(dp: Dispatcher):
     dp.message.register(private_start, CommandStart(), F.chat.type == 'private')
     dp.message.register(owner_inbox_cmd, Command('inbox'), F.chat.type == 'private')
     dp.message.register(owner_inbox_cmd, Command('owner'), F.chat.type == 'private')
@@ -289,7 +290,6 @@ async def main():
     dp.message.register(today_cmd, Command('today'), F.chat.type == 'private')
     dp.message.register(tomorrow_cmd, Command('tomorrow'), F.chat.type == 'private')
     dp.message.register(all_bookings, Command('bookings'), F.chat.type == 'private')
-
     dp.message.register(group_booking_entry, Command('book'), F.chat.type.in_({'group', 'supergroup'}))
     dp.message.register(group_booking_entry, Command('booking'), F.chat.type.in_({'group', 'supergroup'}))
 
@@ -307,33 +307,79 @@ async def main():
     dp.callback_query.register(move_time, Booking.move_time, F.data.startswith('mslot:'))
     dp.callback_query.register(confirm, F.data.startswith('confirm:'))
 
-    # AI is optional. ai_chat itself falls back to deterministic offline_agent.
+    # OpenRouter is optional; ai_chat has deterministic offline fallback.
     dp.message.register(ai_chat, F.text, F.chat.type == 'private')
+
+
+async def polling_fallback(bot: Bot, dp: Dispatcher):
+    global TRANSPORT, TELEGRAM_OK
+    TRANSPORT = "polling-fallback"
+    while True:
+        try:
+            await asyncio.wait_for(bot.delete_webhook(drop_pending_updates=False), timeout=15)
+            me = await asyncio.wait_for(bot.get_me(), timeout=15)
+            TELEGRAM_OK = True
+            print(f"polling fallback auth OK @{me.username}", flush=True)
+            await dp.start_polling(
+                bot,
+                allowed_updates=dp.resolve_used_update_types(),
+                polling_timeout=20,
+                close_bot_session=False,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            TELEGRAM_OK = False
+            print(f"polling fallback restart: {type(exc).__name__}: {exc}", flush=True)
+            await asyncio.sleep(5)
+
+
+async def main():
+    global TRANSPORT, TELEGRAM_OK
+    if not config.token:
+        raise RuntimeError('BOT_TOKEN missing')
+
+    await db.init_db()
+    bot = Bot(config.token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher()
+    register_handlers(dp)
 
     scheduler = AsyncIOScheduler(timezone=config.tz)
     scheduler.add_job(reminder_job, 'cron', hour=18, minute=0, args=[bot])
     scheduler.start()
-    health_runner = await start_health_server()
 
-    print(
-        f"INNA bot ready | ai_configured={bool(config.openrouter_api_key)} | "
-        f"offline_fallback=True | owner_inbox=True | work={WORK_START}-{WORK_END} | "
-        f"group=@{config.group_username} | model={config.openrouter_model} | port={config.port}",
-        flush=True,
-    )
+    secret = hashlib.sha256(config.token.encode("utf-8")).hexdigest()[:48]
+    web_runner = await start_web_server(bot, dp, secret)
+    print(f"HTTP health ready on port {config.port}", flush=True)
 
     try:
-        # Aiogram reconnects network polling errors internally. Keeping one
-        # process/one polling loop prevents duplicate getUpdates consumers.
-        await dp.start_polling(
-            bot,
-            allowed_updates=dp.resolve_used_update_types(),
-            polling_timeout=20,
-            close_bot_session=False,
-        )
+        try:
+            me = await asyncio.wait_for(bot.get_me(), timeout=15)
+            await asyncio.wait_for(
+                bot.set_webhook(
+                    f"{PUBLIC_URL}{WEBHOOK_PATH}",
+                    secret_token=secret,
+                    allowed_updates=dp.resolve_used_update_types(),
+                    drop_pending_updates=False,
+                ),
+                timeout=15,
+            )
+            TELEGRAM_OK = True
+            TRANSPORT = "webhook"
+            print(
+                f"INNA bot ready | telegram=@{me.username} | transport=webhook | "
+                f"offline_fallback=True | work={WORK_START}-{WORK_END}",
+                flush=True,
+            )
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"webhook startup failed: {type(exc).__name__}: {exc}; using polling fallback", flush=True)
+            await polling_fallback(bot, dp)
     finally:
         scheduler.shutdown(wait=False)
-        await health_runner.cleanup()
+        await web_runner.cleanup()
         await bot.session.close()
 
 
