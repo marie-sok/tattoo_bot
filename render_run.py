@@ -1,12 +1,14 @@
 import asyncio
 from datetime import datetime, time, timedelta
+from pathlib import Path
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import config
@@ -31,13 +33,16 @@ from app.main import (
     move_time,
     my_booking,
     owner_list,
-    portfolio,
     reference,
     TZ,
     dtfmt,
     booking_actions,
 )
 
+ROOT = Path(__file__).resolve().parent
+WORK_START = "11:00"
+WORK_END = "18:00"
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 PRICE_TEXT = (
     "💰 <b>Цены Инны</b>\n\n"
@@ -59,27 +64,25 @@ def _clock(value: str) -> time:
 
 
 async def runtime_slots_for(d, duration: int, exclude=None):
-    start = datetime.combine(d, _clock(config.work_start), TZ)
-    end = datetime.combine(d, _clock(config.work_end), TZ)
+    start = datetime.combine(d, _clock(WORK_START), TZ)
+    end = datetime.combine(d, _clock(WORK_END), TZ)
     out = []
     cur = start
     while cur + timedelta(minutes=duration) <= end:
-        finish = cur + timedelta(minutes=duration)
+        finish_at = cur + timedelta(minutes=duration)
         if cur > datetime.now(TZ) and not await db.overlaps(
-            cur.replace(tzinfo=None), finish.replace(tzinfo=None), exclude
+            cur.replace(tzinfo=None), finish_at.replace(tzinfo=None), exclude
         ):
             out.append(cur)
         cur += timedelta(minutes=30)
     return out
 
 
-# app.main handlers resolve slots_for from their module globals at runtime.
-# Replacing it here makes booking and rescheduling enforce 11:00–18:00.
+# Production runtime owns the actual availability rules.
 app_main.slots_for = runtime_slots_for
 
 
 async def private_start(message, state):
-    """Give Inna a dedicated private owner inbox; clients get the normal flow."""
     username = (message.from_user.username or "").lower()
     if username == config.owner_username:
         await state.clear()
@@ -95,7 +98,7 @@ async def private_start(message, state):
     await state.clear()
     await message.answer(
         "✨ <b>INNA STRAKHOVA · Tattoo & PMU</b>\n\n"
-        f"Рабочее время: <b>{config.work_start}–{config.work_end}</b>.\n"
+        f"Рабочее время: <b>{WORK_START}–{WORK_END}</b>.\n"
         "Напиши своими словами, что хочешь сделать, или используй кнопки.",
         reply_markup=main_kb(),
     )
@@ -156,6 +159,46 @@ async def detail_cb(c, state):
     await c.answer()
 
 
+async def safe_portfolio(message: object, bot: Bot):
+    """Portfolio must never break the bot because of one invalid media file."""
+    await message.answer('🖤 <b>Работы Инны</b>')
+    tattoo_dir = ROOT / 'assets' / 'portfolio' / 'tattoo'
+    pmu_dir = ROOT / 'assets' / 'portfolio' / 'pmu'
+
+    tattoo_files = sorted(
+        p for p in tattoo_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+    ) if tattoo_dir.exists() else []
+    pmu_files = sorted(
+        p for p in pmu_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+    ) if pmu_dir.exists() else []
+
+    sent = 0
+    failed = 0
+    for photo_path in tattoo_files[:9] + pmu_files[:3]:
+        try:
+            await bot.send_photo(message.chat.id, FSInputFile(photo_path))
+            sent += 1
+        except TelegramAPIError as exc:
+            failed += 1
+            print(f"portfolio skip {photo_path.name}: {type(exc).__name__}: {exc}", flush=True)
+        except Exception as exc:
+            failed += 1
+            print(f"portfolio unexpected skip {photo_path.name}: {type(exc).__name__}: {exc}", flush=True)
+
+    if sent == 0:
+        await message.answer(
+            'Сейчас фотографии временно недоступны, но запись и все остальные функции работают 🖤',
+            reply_markup=main_kb(),
+        )
+    elif failed:
+        await message.answer(
+            'Часть фотографий обновляется. Остальные работы уже показала 🖤',
+            reply_markup=main_kb(),
+        )
+
+
 async def today_cmd(message):
     await owner_list(message, 0)
 
@@ -165,7 +208,6 @@ async def tomorrow_cmd(message):
 
 
 async def group_booking_entry(message, bot: Bot):
-    """Safe funnel from Inna's group/channel discussion into private booking chat."""
     me = await bot.get_me()
     deep_link = f"https://t.me/{me.username}?start=inna_kolor"
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -193,7 +235,7 @@ async def reminder_job(bot: Bot):
             )
             await db.mark_reminder(row['id'])
         except Exception as exc:
-            print(f"reminder error booking={row['id']}: {exc}")
+            print(f"reminder error booking={row['id']}: {exc}", flush=True)
 
 
 async def health(_request):
@@ -203,7 +245,7 @@ async def health(_request):
         "ai_configured": bool(config.openrouter_api_key),
         "offline_fallback": True,
         "owner_inbox": True,
-        "work_hours": f"{config.work_start}-{config.work_end}",
+        "work_hours": f"{WORK_START}-{WORK_END}",
         "group": f"@{config.group_username}",
         "model": config.openrouter_model,
     })
@@ -228,13 +270,20 @@ async def main():
         config.token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+
+    # Polling and webhook are mutually exclusive. Clear any stale webhook left by
+    # previous experiments/deployments; otherwise getUpdates can stay silent.
+    await bot.delete_webhook(drop_pending_updates=False)
+    me = await bot.get_me()
+    print(f"Telegram auth OK: @{me.username} id={me.id}", flush=True)
+
     dp = Dispatcher()
 
     dp.message.register(private_start, CommandStart(), F.chat.type == 'private')
     dp.message.register(owner_inbox_cmd, Command('inbox'), F.chat.type == 'private')
     dp.message.register(owner_inbox_cmd, Command('owner'), F.chat.type == 'private')
     dp.message.register(begin, F.text == '✨ Записаться', F.chat.type == 'private')
-    dp.message.register(portfolio, F.text == '🖤 Работы Инны', F.chat.type == 'private')
+    dp.message.register(safe_portfolio, F.text == '🖤 Работы Инны', F.chat.type == 'private')
     dp.message.register(prices_cmd, F.text == '💰 Цены', F.chat.type == 'private')
     dp.message.register(my_booking, F.text == '📅 Моя запись', F.chat.type == 'private')
     dp.message.register(today_cmd, Command('today'), F.chat.type == 'private')
@@ -258,7 +307,7 @@ async def main():
     dp.callback_query.register(move_time, Booking.move_time, F.data.startswith('mslot:'))
     dp.callback_query.register(confirm, F.data.startswith('confirm:'))
 
-    # AI concierge is private-chat only. Booking writes, slot checks and owner notifications remain deterministic.
+    # AI is optional. ai_chat itself falls back to deterministic offline_agent.
     dp.message.register(ai_chat, F.text, F.chat.type == 'private')
 
     scheduler = AsyncIOScheduler(timezone=config.tz)
@@ -267,12 +316,21 @@ async def main():
     health_runner = await start_health_server()
 
     print(
-        f"INNA bot started | ai_configured={bool(config.openrouter_api_key)} | "
-        f"offline_fallback=True | owner_inbox=True | work={config.work_start}-{config.work_end} | "
-        f"group=@{config.group_username} | model={config.openrouter_model} | port={config.port}"
+        f"INNA bot ready | ai_configured={bool(config.openrouter_api_key)} | "
+        f"offline_fallback=True | owner_inbox=True | work={WORK_START}-{WORK_END} | "
+        f"group=@{config.group_username} | model={config.openrouter_model} | port={config.port}",
+        flush=True,
     )
+
     try:
-        await dp.start_polling(bot)
+        # Aiogram reconnects network polling errors internally. Keeping one
+        # process/one polling loop prevents duplicate getUpdates consumers.
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+            polling_timeout=20,
+            close_bot_session=False,
+        )
     finally:
         scheduler.shutdown(wait=False)
         await health_runner.cleanup()
